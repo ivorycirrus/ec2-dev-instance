@@ -9,6 +9,17 @@ AWS에 개발용 EC2 인스턴스 한 대를 만드는 배포 스크립트입니
 
 ## 빠른 시작
 
+[Releases](https://github.com/ivorycirrus/ec2-dev-instance/releases)에서 빌드된 `deploy.sh` 하나만 받아서 쓸 수 있습니다.
+
+```bash
+curl -fLO https://github.com/ivorycirrus/ec2-dev-instance/releases/latest/download/deploy.sh
+chmod +x deploy.sh
+vi deploy.sh            # 상단 설정 영역 수정
+./deploy.sh             # 계획과 변경 세트를 확인하고 y 입력
+```
+
+소스에서 직접 빌드하려면 다음과 같이 합니다.
+
 ```bash
 git clone git@github.com:ivorycirrus/ec2-dev-instance.git
 cd ec2-dev-instance
@@ -29,6 +40,8 @@ dist/deploy.sh          # 계획과 변경 세트를 확인하고 y 입력
 │   └── user-data.sh          최초 부팅 때 실행되는 개발 환경 설치 스크립트
 ├── scripts/
 │   └── build.sh              src/의 세 파일을 dist/deploy.sh 하나로 병합
+├── .github/workflows/
+│   └── release.yml           v* 태그를 push하면 빌드해서 GitHub Release에 deploy.sh를 올림
 └── dist/
     └── deploy.sh             빌드 결과. 이 파일 하나만 있으면 어디서든 실행됨. 직접 고치지 않음
 ```
@@ -48,6 +61,17 @@ scripts/build.sh
 빌드는 결과물의 문법(`bash -n`)을 검사하고, 각 함수가 원본 파일을 바이트 단위로 똑같이 출력하는지 확인한 뒤에만 `dist/deploy.sh`를 교체합니다.
 
 개발 중에는 빌드 없이 `src/deploy.sh`를 바로 실행해도 됩니다. 이때는 옆에 있는 두 파일을 읽습니다.
+
+## 릴리스
+
+`v`로 시작하는 태그를 push하면 GitHub Actions(`.github/workflows/release.yml`)가 `scripts/build.sh`를 실행하고, 그 태그 이름으로 Release를 만들어 `deploy.sh`를 첨부합니다. 릴리스 노트에는 다운로드 명령과 sha256이 들어갑니다.
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+같은 태그로 다시 릴리스하려면 GitHub에서 기존 Release와 태그를 지운 뒤 다시 push합니다.
 
 ## 사용법
 

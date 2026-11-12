@@ -1,0 +1,42 @@
+# Push a tag such as v0.2.0 to build dist/deploy.sh and publish it as a
+# GitHub Release asset:
+#   git tag v0.2.0 && git push origin v0.2.0
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # create the release and upload the asset
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build
+        run: bash scripts/build.sh
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          sha="$(sha256sum dist/deploy.sh | cut -d' ' -f1)"
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/deploy.sh"
+          cat > notes.md <<EOF
+          ## 사용법
+
+          \`\`\`bash
+          curl -fLO ${url}
+          chmod +x deploy.sh
+          vi deploy.sh     # 상단 설정 영역 수정
+          ./deploy.sh
+          \`\`\`
+
+          \`deploy.sh\` sha256: \`${sha}\`
+          EOF
+          gh release create "$TAG" dist/deploy.sh \
+            --title "$TAG" --notes-file notes.md --generate-notes --verify-tag
