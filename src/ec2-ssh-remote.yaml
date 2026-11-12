@@ -1,0 +1,285 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  EC2 instance in a private subnet with NAT egress, reachable only through
+  AWS Systems Manager (SSH over Session Manager). No key pair, no inbound
+  ports. Created by deploy.sh: it looks up the VPC, subnet, NAT gateway,
+  internet gateway and IAM role, passes the IDs of the ones that exist, and
+  this stack creates the rest.
+
+Parameters:
+  InstanceName:
+    Type: String
+    MinLength: 1
+    Description: Value of the instance Name tag.
+  InstanceType:
+    Type: String
+  VolumeSize:
+    Type: Number
+    MinValue: 8
+    MaxValue: 16384
+    Description: Root gp3 volume size in GiB.
+  ImageId:
+    Type: AWS::EC2::Image::Id
+    Description: AL2023 AMI matching the architecture of InstanceType.
+
+  RoleName:
+    Type: String
+    AllowedPattern: '^[\w+=,.@-]{1,64}$'
+  CreateRole:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Description: true = create RoleName in this stack, false = RoleName already exists.
+
+  VpcId:
+    Type: String
+    Default: ''
+    Description: Existing VPC. Empty = create one.
+  VpcName:
+    Type: String
+    MinLength: 1
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: Used only when the VPC is created.
+  SubnetId:
+    Type: String
+    Default: ''
+    Description: Existing private subnet. Empty = create one.
+  SubnetName:
+    Type: String
+    MinLength: 1
+  PrivateSubnetCidr:
+    Type: String
+    Description: Used only when the private subnet is created (may be empty otherwise).
+  PublicSubnetCidr:
+    Type: String
+    Description: Used only when the NAT gateway and its public subnet are created (may be empty otherwise).
+  AvailabilityZone:
+    Type: String
+    Default: ''
+    Description: AZ of the subnets created by this stack.
+  NatGatewayId:
+    Type: String
+    Default: ''
+    Description: Existing NAT gateway for the new private subnet. Empty = create one.
+  InternetGatewayId:
+    Type: String
+    Default: ''
+    Description: Internet gateway already attached to VpcId. Empty = create one.
+
+Conditions:
+  NewVpc: !Equals [!Ref VpcId, '']
+  NewSubnet: !Equals [!Ref SubnetId, '']
+  NewNat: !And [!Condition NewSubnet, !Equals [!Ref NatGatewayId, '']]
+  NewIgw: !And [!Condition NewNat, !Equals [!Ref InternetGatewayId, '']]
+  NewRole: !Equals [!Ref CreateRole, 'true']
+
+Resources:
+  # ---------------------------------------------------------------- Network
+  Vpc:
+    Type: AWS::EC2::VPC
+    Condition: NewVpc
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - { Key: Name, Value: !Ref VpcName }
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Condition: NewIgw
+    Properties:
+      Tags:
+        - { Key: Name, Value: !Sub '${VpcName}-igw' }
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Condition: NewIgw
+    Properties:
+      VpcId: !If [NewVpc, !Ref Vpc, !Ref VpcId]
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Condition: NewNat
+    Properties:
+      VpcId: !If [NewVpc, !Ref Vpc, !Ref VpcId]
+      CidrBlock: !Ref PublicSubnetCidr
+      AvailabilityZone: !Ref AvailabilityZone
+      MapPublicIpOnLaunch: false
+      Tags:
+        - { Key: Name, Value: !Sub '${VpcName}-public' }
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: NewNat
+    Properties:
+      VpcId: !If [NewVpc, !Ref Vpc, !Ref VpcId]
+      Tags:
+        - { Key: Name, Value: !Sub '${VpcName}-public-rt' }
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    Condition: NewNat
+    Metadata:
+      # Conditional DependsOn: wait for the attachment only when this stack
+      # creates the internet gateway.
+      IgwAttached: !If [NewIgw, !Ref InternetGatewayAttachment, 'existing-igw']
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !If [NewIgw, !Ref InternetGateway, !Ref InternetGatewayId]
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: NewNat
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  NatEip:
+    Type: AWS::EC2::EIP
+    Condition: NewNat
+    Properties:
+      Domain: vpc
+      Tags:
+        - { Key: Name, Value: !Sub '${VpcName}-nat-eip' }
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Condition: NewNat
+    # The NAT gateway needs the IGW attached; the public route waits for it.
+    DependsOn: [PublicDefaultRoute, PublicSubnetRouteTableAssociation]
+    Properties:
+      AllocationId: !GetAtt NatEip.AllocationId
+      SubnetId: !Ref PublicSubnet
+      Tags:
+        - { Key: Name, Value: !Sub '${VpcName}-nat' }
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Condition: NewSubnet
+    Properties:
+      VpcId: !If [NewVpc, !Ref Vpc, !Ref VpcId]
+      CidrBlock: !Ref PrivateSubnetCidr
+      AvailabilityZone: !Ref AvailabilityZone
+      MapPublicIpOnLaunch: false
+      Tags:
+        - { Key: Name, Value: !Ref SubnetName }
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: NewSubnet
+    Properties:
+      VpcId: !If [NewVpc, !Ref Vpc, !Ref VpcId]
+      Tags:
+        - { Key: Name, Value: !Sub '${SubnetName}-rt' }
+
+  PrivateDefaultRoute:
+    Type: AWS::EC2::Route
+    Condition: NewSubnet
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !If [NewNat, !Ref NatGateway, !Ref NatGatewayId]
+
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: NewSubnet
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+  # -------------------------------------------------------------------- IAM
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Condition: NewRole
+    Properties:
+      RoleName: !Ref RoleName
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore'
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AWSCodeCommitPowerUser'
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonS3FullAccess'
+      Tags:
+        - { Key: Name, Value: !Ref RoleName }
+
+  # An instance attaches a role through an instance profile, so one is
+  # created for either the new role or the existing one.
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !If [NewRole, !Ref InstanceRole, !Ref RoleName]
+
+  # --------------------------------------------------------------- Compute
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub 'No inbound. Access via SSM only (${InstanceName})'
+      VpcId: !If [NewVpc, !Ref Vpc, !Ref VpcId]
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+          Description: All outbound (SSM endpoints, package repos, etc.)
+      Tags:
+        - { Key: Name, Value: !Sub '${InstanceName}-sg' }
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Metadata:
+      # Conditional DependsOn: when this stack creates the subnet, boot only
+      # after its NAT route is in place so user data can reach the internet.
+      NetworkReady: !If
+        - NewSubnet
+        - [!Ref PrivateDefaultRoute, !Ref PrivateSubnetRouteTableAssociation]
+        - existing-subnet
+      cfn-lint:
+        config:
+          # SubnetId's '' default never reaches the existing-subnet branch.
+          ignore_checks: [W1030]
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !If [NewSubnet, !Ref PrivateSubnet, !Ref SubnetId]
+      SecurityGroupIds:
+        - !Ref InstanceSecurityGroup
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        HttpPutResponseHopLimit: 2
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda # root device of AL2023 AMIs
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: !Ref VolumeSize
+            Encrypted: true
+            DeleteOnTermination: true
+      PropagateTagsToVolumeOnCreation: true
+      Tags:
+        - { Key: Name, Value: !Ref InstanceName }
+      # deploy.sh replaces this placeholder with the base64 of the user data.
+      UserData: '{{USER_DATA_BASE64}}'
+
+Outputs:
+  InstanceId:
+    Value: !Ref Instance
+  PrivateIp:
+    Value: !GetAtt Instance.PrivateIp
+  AvailabilityZone:
+    Value: !GetAtt Instance.AvailabilityZone
+  ImageId:
+    Value: !Ref ImageId
+  VpcId:
+    Value: !If [NewVpc, !Ref Vpc, !Ref VpcId]
+  SubnetId:
+    Value: !If [NewSubnet, !Ref PrivateSubnet, !Ref SubnetId]
+  RoleName:
+    Value: !Ref RoleName

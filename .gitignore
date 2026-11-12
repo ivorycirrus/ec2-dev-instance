@@ -1,0 +1,9 @@
+# Build output of scripts/build.sh
+dist/
+
+# OS and editor files
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
